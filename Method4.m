@@ -1,0 +1,164 @@
+% Clear
+clear;
+clc;
+
+% Step 1: Read image and convert to HSI
+image = imread("D:\EqualizeHistogram\EqualizeHistogram\image.png");
+[rows, cols, ~] = size(image);
+
+% Convert RGB to HSI
+tempImage = double(image) / 255;
+hsiImage = rgb2hsi(tempImage);
+
+% Extract H, S, and I channels
+H = hsiImage(:, :, 1);
+S = hsiImage(:, :, 2);
+I = hsiImage(:, :, 3);
+
+% Step 2: Set levels for intensity and saturation
+L = 256;
+M = 256;
+
+% Initialize 2D histogram for intensity and saturation
+histo2D = zeros(L, M);
+
+% Populate the 2D histogram
+for r = 1:rows
+    for c = 1:cols
+        iLevel = round(I(r, c) * (L - 1)) + 1;
+        sLevel = round(S(r, c) * (M - 1)) + 1;
+        histo2D(iLevel, sLevel) = histo2D(iLevel, sLevel) + 1;
+    end
+end
+
+% Update parameters
+n1_I = sum(sum(histo2D == 1, 2) > 0);
+n2_I = sum(sum(histo2D == 2, 2) > 0);
+b_I = n1_I / (n1_I + 2 * n2_I);
+
+n1_S = sum(histo2D == 1, 'all');
+n2_S = sum(histo2D == 2, 'all');
+b_S = n1_S / (n1_S + 2 * n2_S);
+
+% Step 3: Compute marginal CDF for intensity (F(x_I))
+pdfS = zeros(M, 1);
+
+for j = 1:M
+    pdfS(j) = sum(histo2D(:, j)) / (rows * cols);
+end
+
+pdfI = zeros(L, 1);
+cdfI = zeros(L, 1);
+
+for i = 1:L
+    if sum(histo2D(i, :) > 0)
+        pdfI(i) = (sum(histo2D(i, :)) - b_I) / (rows * cols);
+    else
+        unseen_count = sum(sum(histo2D(:, :), 2) == 0);
+        pdfI(i) = b_I * (L - unseen_count) / (rows * cols) / (unseen_count + eps);
+    end
+    
+    if i > 1
+        cdfI(i) = cdfI(i-1) + pdfI(i);
+    else
+        cdfI(i) = pdfI(i);
+    end
+end
+
+pdfS_given_I = zeros(L, M);
+cdfS_given_I = zeros(L, M);
+
+for i = 1:L
+    if cdfI(i) > 0
+        sum_pdfS_unseen = sum(pdfS(histo2D(i, :) == 0));
+
+        for j = 1:M
+            if histo2D(i, j) > 0
+                pdfS_given_I(i, j) = (histo2D(i, j) - b_S) / sum(histo2D(i, :));
+            else
+                unseen_count = sum(histo2D(i, :) == 0);
+                pdfS_given_I(i, j) = b_S * (M - unseen_count) * pdfS(j) / sum(histo2D(i, :)) / sum_pdfS_unseen;
+            end
+            if j > 1
+                cdfS_given_I(i, j) = cdfS_given_I(i, j - 1) + pdfS_given_I(i, j);
+            else
+                cdfS_given_I(i, j) = pdfS_given_I(i, j);
+            end
+        end
+    end
+end
+
+% Step 4: Equalize I and S channels
+equalizedI = zeros(rows, cols);
+equalizedS = zeros(rows, cols);
+
+for r = 1:rows
+    for c = 1:cols
+        % Original intensity and saturation levels
+        iLevel = round(I(r, c) * (L - 1)) + 1;
+        sLevel = round(S(r, c) * (M - 1)) + 1;
+        
+        % Compute the equalized values using the CDF
+        equalizedI(r, c) = cdfI(iLevel);
+        equalizedS(r, c) = cdfS_given_I(iLevel, sLevel);
+    end
+end
+
+% Scale equalized intensity and saturation back to [0, 1] range
+equalizedI = min(max(equalizedI, 0), 1);
+equalizedS = min(max(equalizedS, 0), 1);
+
+% Step 5: Reconstruct equalized HSI image and convert back to RGB
+equalizedHSI = cat(3, H, equalizedS, equalizedI);
+equalizedRGB = uint8(hsi2rgb(equalizedHSI) * 255);
+
+% Display results
+figure;
+subplot(1, 2, 1);
+imshow(image);
+title('Original Image');
+
+subplot(1, 2, 2);
+imshow(equalizedRGB);
+title('Equalized Image');
+
+% Supporting function: RGB to HSI
+function hsi = rgb2hsi(rgb)
+    R = rgb(:, :, 1);
+    G = rgb(:, :, 2);
+    B = rgb(:, :, 3);
+    numerator = 0.5 * ((R - G) + (R - B));
+    denominator = sqrt((R - G).^2 + (R - B).*(G - B));
+    theta = acos(numerator ./ (denominator + eps));
+    H = theta;
+    H(B > G) = 2 * pi - H(B > G);
+    H = H / (2 * pi);
+    S = 1 - 3 * min(cat(3, R, G, B), [], 3) ./ (R + G + B + eps);
+    I = (R + G + B) / 3;
+    hsi = cat(3, H, S, I);
+end
+
+% Supporting function: HSI to RGB
+function rgb = hsi2rgb(hsi)
+    H = hsi(:, :, 1) * 2 * pi;
+    S = hsi(:, :, 2);
+    I = hsi(:, :, 3);
+    R = zeros(size(H));
+    G = zeros(size(H));
+    B = zeros(size(H));
+    idx = (0 <= H) & (H < 2 * pi / 3);
+    B(idx) = I(idx) .* (1 - S(idx));
+    R(idx) = I(idx) .* (1 + S(idx) .* cos(H(idx)) ./ cos(pi / 3 - H(idx)));
+    G(idx) = 3 * I(idx) - (R(idx) + B(idx));
+    idx = (2 * pi / 3 <= H) & (H < 4 * pi / 3);
+    H(idx) = H(idx) - 2 * pi / 3;
+    R(idx) = I(idx) .* (1 - S(idx));
+    G(idx) = I(idx) .* (1 + S(idx) .* cos(H(idx)) ./ cos(pi / 3 - H(idx)));
+    B(idx) = 3 * I(idx) - (R(idx) + G(idx));
+    idx = (4 * pi / 3 <= H) & (H <= 2 * pi);
+    H(idx) = H(idx) - 4 * pi / 3;
+    G(idx) = I(idx) .* (1 - S(idx));
+    B(idx) = I(idx) .* (1 + S(idx) .* cos(H(idx)) ./ cos(pi / 3 - H(idx)));
+    R(idx) = 3 * I(idx) - (G(idx) + B(idx));
+    rgb = cat(3, R, G, B);
+end
